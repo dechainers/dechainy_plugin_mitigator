@@ -13,12 +13,10 @@
 # limitations under the License.
 import ctypes as ct
 from dataclasses import dataclass, field
-
 from typing import List
 
-from dechainy.ebpf import LpmKey, ProbeCompilation
+from dechainy.plugins import Probe
 from dechainy.utility import ipv4_to_network_int
-from dechainy.plugins import Probe, HookSetting
 
 
 @dataclass
@@ -29,26 +27,25 @@ class MitigatorRule:
         ip (str): The Ip to block
         netmask (int): The length of the netmask. Default 32.
     """
-    netmask: int
     ip: str
+    netmask: int
 
 
 @dataclass
 class Mitigator(Probe):
     """Mitigator class, an eBPF implementation of an IP/Netmask mitigator."""
     __max_rules: int = 1000
-    __rules: List[MitigatorRule] = field(default_factory=lambda: [])
+    __rules: List[MitigatorRule] = field(default_factory=list)
 
     def __post_init__(self):
-        self.egress = HookSetting()
-        self.ingress.required = True
-        super().__post_init__(path=__file__)
-        self.ingress.cflags.append('-DMAX_RULES={}'.format(self.__max_rules))
+        if not self.egress.required:
+            self.ingress.required = True
         if 'max_rules' in self.extra:
             self.__max_rules = self.extra['max_rules']
+        self.ingress.cflags.append('-DMAX_RULES={}'.format(self.__max_rules))
+        super().__post_init__(path=__file__)
 
-    def post_compilation(self, comp: ProbeCompilation):
-        super().post_compilation(comp)
+    def post_compilation(self):
         if self.__rules:
             [self.insert(x) for x in self.__rules]
 
@@ -92,9 +89,11 @@ class Mitigator(Probe):
             raise IndexError("The Rule ID provided is wrong")
 
         rule = self.__rules.pop(rule_id)
-        key = LpmKey(rule.netmask, ipv4_to_network_int(rule.ip))
+        p = self.ingress.program_ref()
+        key = p['BLACKLISTED_IPS'].Key(
+            rule.netmask, ipv4_to_network_int(rule.ip))
 
-        del self._programs.ingress['BLACKLISTED_IPS'][key]
+        del p['BLACKLISTED_IPS'][key]
         return rule_id
 
     def delete(self, rule: MitigatorRule) -> str:
@@ -137,9 +136,10 @@ class Mitigator(Probe):
         if rule_id == self.__max_rules:
             raise MemoryError("You reached the maximum amount of rules")
 
-        key = LpmKey(rule.netmask, ipv4_to_network_int(rule.ip))
-        self._programs.ingress['BLACKLISTED_IPS'][key] = ct.c_ulong(
-            0)
+        p = self.ingress.program_ref()
+        key = p['BLACKLISTED_IPS'].Key(
+            rule.netmask, ipv4_to_network_int(rule.ip))
+        p['BLACKLISTED_IPS'][key] = ct.c_ulong(0)
         self.__rules.insert(rule_id, rule)
         return rule_id
 
@@ -185,5 +185,5 @@ class Mitigator(Probe):
         """
         ret = len(self.__rules)
         self.__rules.clear()
-        self._programs.ingress['BLACKLISTED_IPS'].clear()
+        self.ingress.program_ref()['BLACKLISTED_IPS'].clear()
         return ret
